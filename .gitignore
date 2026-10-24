@@ -1,0 +1,27 @@
+# Passwords and API credentials
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Local financial databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python temporary files
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Mac system files
+.DS_Store
+
+# Personal financial exports
+backups/
+exports/
+financial_data/
