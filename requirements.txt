@@ -3,3 +3,4 @@ pandas>=2.0,<3
 plotly>=5.20,<7
 yfinance>=0.2.50,<2
 psycopg[binary]>=3.2,<4
+openai>=1.40,<3

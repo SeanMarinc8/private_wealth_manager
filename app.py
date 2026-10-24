@@ -1,4 +1,7 @@
 import hmac
+import io
+import json
+import math
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -53,12 +56,20 @@ except Exception:
     st.stop()
 st.title('💼 Private Wealth AI')
 st.caption('Your personal wealth office • Persistent PostgreSQL storage • Educational decision support, not autonomous trading')
-page = st.sidebar.radio('Workspace', ['Overview', 'Accounts', 'Portfolio', 'Cash Flow', 'Financial Planner', 'Advisor'])
+page = st.sidebar.radio('Workspace', ['Overview', 'Accounts', 'Portfolio', 'Cash Flow', 'Financial Planner', 'Advisor', 'AI Chat', 'Restore CSV'])
 accounts = con.frame('accounts')
 transactions = con.frame('transactions')
 holdings = con.frame('holdings')
-assets = accounts.loc[accounts.category != 'Debt', 'balance'].sum() + (holdings.shares * holdings.price).sum() if not holdings.empty else accounts.loc[accounts.category != 'Debt', 'balance'].sum()
-debts = accounts.loc[accounts.category == 'Debt', 'balance'].sum()
+# Prevent double counting: when an Investment account has matching holdings,
+# count the holdings market value instead of the manually entered account balance.
+# Account nicknames must match EXACTLY between Accounts and Portfolio.
+investment_names = set(holdings['account'].astype(str)) if not holdings.empty else set()
+non_debt = accounts.loc[accounts.category != 'Debt']
+covered_investment = (non_debt.category == 'Investment') & non_debt.name.isin(investment_names)
+manual_assets = float(non_debt.loc[~covered_investment, 'balance'].sum())
+portfolio_assets = float((holdings.shares * holdings.price).sum()) if not holdings.empty else 0.0
+assets = manual_assets + portfolio_assets
+debts = float(accounts.loc[accounts.category == 'Debt', 'balance'].sum())
 networth = assets - debts
 money = lambda n: f'${n:,.2f}'
 
@@ -67,7 +78,11 @@ if page == 'Overview':
     st.caption('For disaster recovery, enable automated backups in your database provider. Streamlit hosting alone does not back up this data.')
     a,b,c = st.columns(3)
     a.metric('Total assets', money(assets)); b.metric('Total debts', money(debts)); c.metric('Net worth', money(networth))
-    st.info('Add your accounts and investments to begin. Do not enter passwords, account numbers, or other secrets.')
+    st.info('Investment accounts with matching portfolio account nicknames use their holdings value instead of their account balance. If an investment account contains untracked cash, add that cash as a separate Cash account. Check account nicknames for exact matches.')
+    if covered_investment.any(): st.caption('Excluded overlapping account balances: ' + ', '.join(non_debt.loc[covered_investment, 'name'].astype(str)))
+    if not holdings.empty and not accounts.empty:
+        unmatched = sorted(set(holdings['account'].astype(str)) - set(accounts['name'].astype(str)))
+        if unmatched: st.warning('Portfolio account nicknames not found in Accounts: ' + ', '.join(unmatched) + '. Check spelling to prevent duplicates.')
     if not accounts.empty:
         st.subheader('Account balances')
         st.bar_chart(accounts.set_index('name')['balance'])
@@ -143,7 +158,7 @@ elif page == 'Portfolio':
             item=st.selectbox('Remove position',view.id.tolist(),format_func=lambda i: f"{view.loc[view.id==i,'account'].iloc[0]} — {view.loc[view.id==i,'ticker'].iloc[0]}")
             if st.form_submit_button('Remove selected position'):
                 con.execute('DELETE FROM holdings WHERE id=?',(int(item),));con.commit();st.rerun()
-    st.warning('Avoid double counting: if you enter individual positions here, do not also enter their combined market value as an account asset.')
+    st.info('Investment accounts with matching account nicknames are replaced by the sum of their tracked holdings in Total Assets. Track any uninvested brokerage cash as a separate Cash account.')
 
 elif page == 'Cash Flow':
     st.subheader('Monthly cash flow entries')
@@ -198,7 +213,110 @@ elif page == 'Advisor':
     if not holdings.empty and (holdings.shares*holdings.price).sum()>0:
         weights=holdings.shares*holdings.price
         if weights.max()/weights.sum()>0.3: st.warning('Portfolio concentration: review diversification before adding to the largest position.')
+    if income>0 and expenses>=0:
+        rate=(income-expenses)/income
+        if rate>=0.2: st.success('Doing well: your recorded savings rate is at least 20%, if your income and expenses are complete.')
+        elif rate>=0: st.info('Needs work: look for sustainable ways to increase your savings rate.')
+    if cash>0 and expenses>0 and cash/expenses>6: st.info('Review: you may have more than six months of recorded expenses in cash; compare with upcoming spending needs before investing.')
+    if not holdings.empty and portfolio_assets>0:
+        if len(holdings.ticker.unique())==1: st.warning('Risk: all tracked investments are in one ticker. Check underlying diversification.')
+        else: st.success('Doing well: you track more than one ticker. This alone does not guarantee diversification.')
     st.write('**Next step:** Build a written investment policy with your goals, horizon, liquidity needs, and acceptable drawdown.')
+    st.caption('These observations are based on entered data and may miss taxes, fees, untracked assets, and future obligations.')
+
+elif page == 'Restore CSV':
+    st.subheader('Restore exported CSV files')
+    st.warning('This operation can overwrite saved records. Download fresh exports first. A CSV export is not a complete database backup.')
+    st.caption('Upload CSVs exported by this app. You can restore one table or several. Rows are validated before any database changes.')
+    expected = {
+        'accounts': ['name','category','balance'],
+        'holdings': ['ticker','shares','price','account','avg_cost'],
+        'transactions': ['description','kind','amount']
+    }
+    uploaded = {t: st.file_uploader(f'{t}.csv', type=['csv'], key='restore_'+t) for t in expected}
+    parsed = {}
+    errors=[]
+    for table_name, file in uploaded.items():
+        if file is None: continue
+        try:
+            df=pd.read_csv(file, dtype=str, keep_default_na=False)
+            missing=set(expected[table_name])-set(df.columns)
+            if missing: raise ValueError('Missing columns: '+', '.join(sorted(missing)))
+            df=df[expected[table_name]].copy()
+            for col in df.columns:
+                if col in ('balance','shares','price','avg_cost','amount'):
+                    df[col]=pd.to_numeric(df[col], errors='raise')
+                    if not df[col].map(math.isfinite).all() or (df[col]<0).any(): raise ValueError('Invalid numeric values in '+col)
+                else:
+                    df[col]=df[col].astype(str).str.strip()
+                    if (df[col]=='').any(): raise ValueError('Empty '+col)
+            if table_name=='accounts':
+                if not df.category.isin(['Cash','Investment','Property','Other asset','Debt']).all(): raise ValueError('Invalid category')
+                if df.name.duplicated().any(): raise ValueError('Duplicate account names')
+            if table_name=='holdings':
+                if (df.shares<=0).any(): raise ValueError('Shares must be positive')
+                df.ticker=df.ticker.str.upper()
+                if df.duplicated(['account','ticker']).any(): raise ValueError('Duplicate account/ticker combinations')
+            if table_name=='transactions' and not df.kind.isin(['Income','Expense']).all(): raise ValueError('Invalid transaction kind')
+            parsed[table_name]=df
+            st.write(f'**{table_name}: {len(df)} rows ready**')
+            st.dataframe(df.head(10), hide_index=True, use_container_width=True)
+        except Exception as e: errors.append(f'{table_name}: {e}')
+    for error in errors: st.error(error)
+    if parsed and not errors:
+        st.caption('Replace mode deletes the existing rows in ONLY the uploaded tables, then imports the CSV contents. Other tables remain untouched.')
+        confirm=st.checkbox('I exported my current data and understand uploaded tables will be replaced.')
+        if st.button('Restore selected CSV tables', type='primary', disabled=not confirm):
+            try:
+                # One transaction: rollback all uploaded tables if any insert fails.
+                for table_name, df in parsed.items():
+                    con.execute('DELETE FROM '+table_name)
+                    for row in df.itertuples(index=False, name=None):
+                        cols=expected[table_name]
+                        placeholders=','.join(['%s']*len(cols))
+                        con.execute(f"INSERT INTO {table_name} ({','.join(cols)}) VALUES ({placeholders})", tuple(row))
+                con.commit()
+                st.success('Restore committed successfully. Refresh to verify your records.')
+            except Exception:
+                con.conn.rollback()
+                st.error('Restore failed. Transaction rolled back; previous records should be unchanged. Check the CSV format.')
+
+elif page == 'AI Chat':
+    st.subheader('Ask your Wealth Advisor')
+    st.caption('Read-only advisor: it can analyze saved data, but cannot place trades or change your accounts.')
+    if 'OPENAI_API_KEY' not in st.secrets:
+        st.info('To enable interactive AI chat, add OPENAI_API_KEY to Streamlit Secrets. API usage may incur charges. Never put the key in GitHub.')
+    else:
+        try:
+            from openai import OpenAI
+            client=OpenAI(api_key=st.secrets['OPENAI_API_KEY'], timeout=30)
+            # Minimal data only: nicknames, balances, positions, and recurring cash flows.
+            context={
+                'accounts': accounts.drop(columns=['id'],errors='ignore').to_dict('records'),
+                'holdings': holdings.drop(columns=['id','updated_at'],errors='ignore').to_dict('records'),
+                'cash_flow': transactions.drop(columns=['id'],errors='ignore').to_dict('records'),
+                'computed': {'total_assets':assets,'debts':debts,'net_worth':networth,'portfolio_value':portfolio_assets},
+                'accounting_rule':'Investment accounts with EXACT matching holding account nicknames are excluded from manually counted assets; holdings values replace them. Investment cash must be recorded separately.'
+            }
+            if 'chat_history' not in st.session_state: st.session_state.chat_history=[]
+            for msg in st.session_state.chat_history:
+                with st.chat_message(msg['role']): st.write(msg['content'])
+            question=st.chat_input('Ask about your financial health, holdings, risk, goals...')
+            if question:
+                with st.chat_message('user'): st.write(question)
+                messages=[{'role':'system','content':('You are a careful financial planning assistant. Answer questions based ONLY on the supplied financial snapshot. Be specific about what is going well, what needs improvement, and 1-3 actionable next steps. Clearly distinguish recorded facts from assumptions. Do not claim live prices or current tax information. No trades or changes to data. Never guarantee returns. Note missing interest rates, goals, account types or essential expenses when relevant. This is educational information, not personalized fiduciary advice. Financial snapshot: '+json.dumps(context,default=str))}]
+                messages += st.session_state.chat_history[-12:]
+                messages.append({'role':'user','content':question})
+                try:
+                    response=client.chat.completions.create(model=str(st.secrets.get('OPENAI_MODEL','gpt-4.1-mini')),messages=messages)
+                    answer=response.choices[0].message.content or 'No response generated.'
+                    st.session_state.chat_history.extend([{'role':'user','content':question},{'role':'assistant','content':answer}])
+                    with st.chat_message('assistant'): st.write(answer)
+                except Exception:
+                    st.error('AI service unavailable. Verify OPENAI_API_KEY, model access and billing; no account data was modified.')
+            if st.button('Clear conversation'): st.session_state.chat_history=[]; st.rerun()
+            st.warning('Questions and the financial snapshot above are sent to the configured AI API when you chat. Avoid sensitive account names or personal identifiers. Do not enable until you are comfortable with that data flow.')
+        except ImportError: st.error('Install the openai dependency from requirements.txt.')
 
 st.sidebar.divider()
 st.sidebar.caption('Data export')
