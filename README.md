@@ -1,29 +1,31 @@
-# Private Wealth — Free Advisor Update
+# Private Wealth — Groq Advisor Update
 
-## Install on your existing Streamlit app
-1. Download current accounts, holdings, and transactions CSV exports as a precaution.
-2. Replace app.py in your existing GitHub repository with app.py from this ZIP.
-3. Replace requirements.txt with the included version. Commit the changes.
-4. Let Streamlit redeploy; reboot the app if needed.
-5. Open Free Advisor Chat and ask “How am I doing?”
+## Install
+1. Export your accounts, holdings, and transactions CSVs as a precaution.
+2. Replace app.py and requirements.txt in your existing GitHub repository with the included files. Commit both files and let Streamlit redeploy.
+3. Keep existing DATABASE_URL and APP_PASSWORD secrets. Add the following at the top level of Streamlit Secrets, above any [section] headings:
 
-Keep your existing DATABASE_URL and APP_PASSWORD in Streamlit Secrets. Use the same database. This update makes no schema changes and does not delete or reset records. No CSV restore is needed for a normal code update. Do not upload secrets to GitHub. OPENAI_API_KEY and OPENAI_MODEL are no longer used and can be removed from Streamlit Secrets.
+GROQ_API_KEY = "your-private-groq-key"
+GROQ_MODEL = "openai/gpt-oss-20b"
 
-## Free advisor
-No OpenAI API calls, API key, or AI usage charges. Existing hosting or database service charges, if any, are separate. Chat runs inside your Streamlit app using transparent rules and your saved data.
+4. Open Advisor Chat. Select Groq AI, type in Your question, and click Ask advisor.
 
-Supported examples:
-- How am I doing? / What should I work on?
-- What is my net worth?
-- Review my cash flow
-- How is my emergency fund?
-- Review my debt
-- Portfolio risk
-- Save $20,000 / Save $20k
+No database migrations, resets, or CSV restores are needed. The app uses your existing PostgreSQL database. Never commit API keys or secrets.toml to GitHub.
 
-Each question stands alone; conversation text is session-only and not used as follow-up context. Replies use the latest loaded saved snapshot. Portfolio weights aggregate each ticker across accounts. Savings timelines assume starting the goal at zero and applying all recorded monthly surplus, with no returns. Reserve targets are illustrative. Saved quotes may be stale. The app cannot infer tax treatment, debt rates, fund contents, or unentered expenses. A single ticker can be a diversified fund. Unknown questions receive supported-topic guidance.
+## Modes
+Groq AI is conversational and sends your question, recent Groq conversation, and the displayed financial summary to Groq. It shares aggregate balances and ticker values, not account nicknames or transaction descriptions. Avoid typing sensitive identifiers in your questions. Preview exactly what is in the snapshot under Financial summary shared with Groq. Configure Zero Data Retention in Groq's console if desired.
 
-Account/portfolio double-counting prevention, CSV exports/restores, and persistent PostgreSQL storage remain in place. Exact investment account nicknames must match holdings account nicknames. Track uninvested brokerage cash separately.
+Free calculator runs locally in the app with no AI API requests. It also serves as fallback for a missing key, usage limits, service failures, model errors, or empty replies. It handles supported keywords; it is not conversational. Responses show which mode produced them. Chat history is session-only; Clear conversation removes it from that session.
 
-## Verification
-Python syntax and nine checks passed for savings calculations, cross-account ticker aggregation, reserve coverage, cash-flow rates, empty data, unsupported questions, deficit handling, and removal of the API-key path. Live Streamlit/PostgreSQL deployment was not available for testing here.
+Groq's Free plan is subject to model-specific limits. This app cannot verify your billing plan or prevent charges if you use a paid Groq plan. It makes one request per submitted question with no automatic retries. No external trading or record-changing tools are exposed.
+
+## Try
+- How am I doing financially?
+- What should I prioritize based on my saved finances?
+- Explain the concentration in my portfolio.
+- What would saving $20,000 require?
+
+Saved prices are not live. Missing debt rates, taxes, fund contents, or expenses limit analysis. AI answers can make mistakes. The calculator uses recorded monthly surplus and an illustrative reserve target.
+
+## Validation
+Python syntax passed. Mocked integration checks passed for a successful Groq response, no-key fallback, and a 429 rate-limit fallback. No live Groq key or PostgreSQL deployment was available here, so live API and deployment behavior remain unverified.
