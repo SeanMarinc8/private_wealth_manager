@@ -1,6 +1,6 @@
 import hmac
 import io
-import json
+import re
 import math
 import pandas as pd
 import plotly.express as px
@@ -56,7 +56,7 @@ except Exception:
     st.stop()
 st.title('💼 Private Wealth AI')
 st.caption('Your personal wealth office • Persistent PostgreSQL storage • Educational decision support, not autonomous trading')
-page = st.sidebar.radio('Workspace', ['Overview', 'Accounts', 'Portfolio', 'Cash Flow', 'Financial Planner', 'Advisor', 'AI Chat', 'Restore CSV'])
+page = st.sidebar.radio('Workspace', ['Overview', 'Accounts', 'Portfolio', 'Cash Flow', 'Financial Planner', 'Advisor', 'Free Advisor Chat', 'Restore CSV'])
 accounts = con.frame('accounts')
 transactions = con.frame('transactions')
 holdings = con.frame('holdings')
@@ -72,6 +72,80 @@ assets = manual_assets + portfolio_assets
 debts = float(accounts.loc[accounts.category == 'Debt', 'balance'].sum())
 networth = assets - debts
 money = lambda n: f'${n:,.2f}'
+
+def free_advisor(question, accounts, transactions, holdings, assets, debts, networth):
+    """Read-only, deterministic answers using the current saved snapshot."""
+    q=question.lower().replace('’', "'")
+    cash=float(accounts.loc[accounts.category=='Cash','balance'].sum())
+    income=float(transactions.loc[transactions.kind=='Income','amount'].sum())
+    expenses=float(transactions.loc[transactions.kind=='Expense','amount'].sum())
+    surplus=income-expenses
+    fmt=lambda x: f'${x:,.2f}'
+    if accounts.empty and transactions.empty and holdings.empty:
+        return 'No saved data yet. Add accounts, portfolio holdings, and monthly income/expenses first. I cannot assess your finances from empty records.'
+    summary=f'**Recorded snapshot:** assets {fmt(assets)}; debts {fmt(debts)}; net worth {fmt(networth)}.'
+    cashflow=f'**Monthly cash flow:** income {fmt(income)}, expenses {fmt(expenses)}, surplus {fmt(surplus)}.'
+    if income>0:
+        cashflow+=f' Recorded surplus rate: {surplus/income:.1%} (before missing expenses, taxes, or transfers).'
+    else:
+        cashflow+=' Add monthly income to calculate a surplus rate.'
+    reserve=f'**Cash:** {fmt(cash)}.'
+    if expenses>0:
+        reserve+=f' Covers {cash/expenses:.1f} months of recorded expenses. Illustrative 3–6 month reserve: {fmt(expenses*3)}–{fmt(expenses*6)}; gap to 3 months: {fmt(max(0,expenses*3-cash))}.'
+    else:
+        reserve+=' Add monthly expenses before assessing reserve coverage; zero recorded expenses does not establish financial security.'
+    debt=f'**Recorded debt:** {fmt(debts)}. Interest rates, minimum payments, and loan terms are not stored, so I cannot rank debts or calculate a reliable payoff date. Include required payments in Cash Flow and compare loan terms before choosing extra repayment.'
+    portfolio='**Portfolio:** no positive-value holdings recorded. Add shares and prices to assess allocation.'
+    if not holdings.empty:
+        values=holdings.assign(value=holdings.shares*holdings.price)
+        weights=values.groupby('ticker')['value'].sum().sort_values(ascending=False)
+        total=float(weights.sum())
+        if total>0:
+            top=str(weights.index[0]); share=float(weights.iloc[0]/total)
+            portfolio=f'**Tracked portfolio:** {fmt(total)} across {len(weights)} ticker(s). Largest ticker: {top}, {share:.1%}, aggregated across accounts. '
+            portfolio+=('Above the app’s illustrative 30% review threshold. ' if share>0.3 else '')
+            portfolio+='Ticker weight alone does not establish risk: a broad fund can contain many investments. Underlying holdings, sectors, and fund overlap are not analyzed. Uses saved prices; check quote dates.'
+    if re.search(r'\b(save|saving|goal|afford|down payment|duplex|house|home)\b',q):
+        matches=re.findall(r'\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([km]?)',q)
+        if not matches:
+            matches=re.findall(r'\b([0-9]+(?:\.[0-9]+)?)\s*([km])\b',q)
+        if len(matches)!=1:
+            answer='For a goal timeline, ask “Save $20,000” using one dollar target. I use recorded monthly surplus and assume you start the goal at $0; existing cash is not automatically committed.'
+        else:
+            number,suffix=matches[0]
+            target=float(number.replace(',',''))*{'':1,'k':1000,'m':1000000}[suffix]
+            if not math.isfinite(target):
+                answer='Please enter a finite dollar target.'
+            elif target<=0:
+                answer='Enter a savings target greater than $0.'
+            elif income<=0 or surplus<=0:
+                answer=cashflow+' A positive recorded monthly surplus is needed to estimate this goal.'
+            else:
+                answer=f'**Goal scenario: {fmt(target)}** from $0 at {fmt(surplus)} per month takes about {math.ceil(target/surplus)} months. Assumes all recorded surplus goes to this goal, with no returns, interest, taxes, or changes in cash flow. Reserve cash and other goals may reduce the amount available.'
+    elif re.search(r'\b(net worth|networth|assets|balance|balances|double count)\b',q):
+        answer=summary+' Investment accounts with exactly matching holding account nicknames use holdings value instead of the entered account balance. Untracked brokerage cash must be entered separately.'
+    elif re.search(r'\b(cash flow|cashflow|income|expense|expenses|spending|budget|surplus|savings rate)\b',q):
+        answer=cashflow
+        rows=transactions.loc[transactions.kind=='Expense'].sort_values('amount',ascending=False).head(3)
+        if not rows.empty:
+            answer+='\n\nLargest recorded expense entries:\n'+ '\n'.join(f'- {r.description}: {fmt(r.amount)}/month' for r in rows.itertuples())
+        if surplus<0: answer+='\n\n**Needs attention:** recorded spending exceeds income; review expenses and required payments before adding commitments.'
+    elif re.search(r'\b(emergency|reserve|reserves|cash|buffer)\b',q): answer=reserve
+    elif re.search(r'\b(debt|debts|loan|loans|payoff|repay|repayment)\b',q): answer=debt
+    elif re.search(r'\b(portfolio|holding|holdings|risk|stock|stocks|invest|investing|investment|diversification|concentration)\b',q): answer=portfolio
+    elif re.search(r'\b(doing|health|review|overview|improve|well|bad|work on|next|summary|help)\b',q):
+        answer='\n\n'.join([summary,cashflow,reserve,portfolio])
+        steps=[]
+        if transactions.empty or income<=0 or expenses<=0: steps.append('Complete monthly income and expenses, including taxes where applicable and loan payments, before treating the surplus as available money.')
+        if surplus<0: steps.append('Review your largest expenses to close the recorded monthly shortfall.')
+        if expenses>0 and cash<expenses*3: steps.append('Compare your cash reserve with the illustrative three-month target above.')
+        if debts>0: steps.append('Collect debt rates and minimum payments to evaluate repayment priorities.')
+        if not steps: steps.append('Choose a specific savings target and verify that recorded income and expenses are complete.')
+        answer+='\n\n**Next steps:**\n'+'\n'.join(f'{i+1}. {v}' for i,v in enumerate(steps[:3]))
+        if income>0 and expenses>0 and surplus>0: answer+='\n\n**Going well:** recorded income exceeds recorded expenses.'
+    else:
+        answer='I can calculate net worth, monthly cash flow, emergency reserves, portfolio weights, and a savings timeline. Try “How am I doing?” or “Save $20,000”. I cannot answer arbitrary questions, recall follow-up context, forecast returns, or provide current tax rules.'
+    return answer+'\n\n_Based on saved entries only; missing data can change the result. Educational calculations, not a forecast._'
 
 if page == 'Overview':
     st.success('Connected to persistent PostgreSQL storage.')
@@ -194,7 +268,7 @@ elif page == 'Financial Planner':
 
 elif page == 'Advisor':
     st.subheader('Wealth Office — Rule-Based Advisor')
-    st.caption('This free MVP uses transparent rules, not an external LLM. AI model integration is a later upgrade.')
+    st.caption('Free rules based on your saved data. Open Free Advisor Chat for questions and savings calculations.')
     income=transactions.loc[transactions.kind=='Income','amount'].sum() if not transactions.empty else 0
     expenses=transactions.loc[transactions.kind=='Expense','amount'].sum() if not transactions.empty else 0
     cash=accounts.loc[accounts.category=='Cash','balance'].sum() if not accounts.empty else 0
@@ -281,42 +355,23 @@ elif page == 'Restore CSV':
                 con.conn.rollback()
                 st.error('Restore failed. Transaction rolled back; previous records should be unchanged. Check the CSV format.')
 
-elif page == 'AI Chat':
-    st.subheader('Ask your Wealth Advisor')
-    st.caption('Read-only advisor: it can analyze saved data, but cannot place trades or change your accounts.')
-    if 'OPENAI_API_KEY' not in st.secrets:
-        st.info('To enable interactive AI chat, add OPENAI_API_KEY to Streamlit Secrets. API usage may incur charges. Never put the key in GitHub.')
-    else:
-        try:
-            from openai import OpenAI
-            client=OpenAI(api_key=st.secrets['OPENAI_API_KEY'], timeout=30)
-            # Minimal data only: nicknames, balances, positions, and recurring cash flows.
-            context={
-                'accounts': accounts.drop(columns=['id'],errors='ignore').to_dict('records'),
-                'holdings': holdings.drop(columns=['id','updated_at'],errors='ignore').to_dict('records'),
-                'cash_flow': transactions.drop(columns=['id'],errors='ignore').to_dict('records'),
-                'computed': {'total_assets':assets,'debts':debts,'net_worth':networth,'portfolio_value':portfolio_assets},
-                'accounting_rule':'Investment accounts with EXACT matching holding account nicknames are excluded from manually counted assets; holdings values replace them. Investment cash must be recorded separately.'
-            }
-            if 'chat_history' not in st.session_state: st.session_state.chat_history=[]
-            for msg in st.session_state.chat_history:
-                with st.chat_message(msg['role']): st.write(msg['content'])
-            question=st.chat_input('Ask about your financial health, holdings, risk, goals...')
-            if question:
-                with st.chat_message('user'): st.write(question)
-                messages=[{'role':'system','content':('You are a careful financial planning assistant. Answer questions based ONLY on the supplied financial snapshot. Be specific about what is going well, what needs improvement, and 1-3 actionable next steps. Clearly distinguish recorded facts from assumptions. Do not claim live prices or current tax information. No trades or changes to data. Never guarantee returns. Note missing interest rates, goals, account types or essential expenses when relevant. This is educational information, not personalized fiduciary advice. Financial snapshot: '+json.dumps(context,default=str))}]
-                messages += st.session_state.chat_history[-12:]
-                messages.append({'role':'user','content':question})
-                try:
-                    response=client.chat.completions.create(model=str(st.secrets.get('OPENAI_MODEL','gpt-4.1-mini')),messages=messages)
-                    answer=response.choices[0].message.content or 'No response generated.'
-                    st.session_state.chat_history.extend([{'role':'user','content':question},{'role':'assistant','content':answer}])
-                    with st.chat_message('assistant'): st.write(answer)
-                except Exception:
-                    st.error('AI service unavailable. Verify OPENAI_API_KEY, model access and billing; no account data was modified.')
-            if st.button('Clear conversation'): st.session_state.chat_history=[]; st.rerun()
-            st.warning('Questions and the financial snapshot above are sent to the configured AI API when you chat. Avoid sensitive account names or personal identifiers. Do not enable until you are comfortable with that data flow.')
-        except ImportError: st.error('Install the openai dependency from requirements.txt.')
+elif page == 'Free Advisor Chat':
+    st.subheader('Ask your Wealth Advisor — Free')
+    st.caption('No API key or AI charges. Transparent calculations and keyword matching run inside this app. Read-only; no trades or account changes.')
+    st.info('Try: How am I doing? • What is my net worth? • Review my cash flow • Emergency fund • Debt • Portfolio risk • Save $20,000')
+    st.caption('This is a rule-based assistant, not a language model. Each question stands alone. Figures use your saved entries, not live prices.')
+    if st.button('Clear conversation'):
+        st.session_state.free_chat_history=[]
+        st.rerun()
+    for msg in st.session_state.get('free_chat_history', []):
+        with st.chat_message(msg['role']): st.markdown(msg['content'])
+    question=st.chat_input('Ask about cash flow, reserves, debt, holdings, or a savings goal')
+    if question:
+        answer=free_advisor(question, accounts, transactions, holdings, assets, debts, networth)
+        with st.chat_message('user'): st.write(question)
+        with st.chat_message('assistant'): st.markdown(answer)
+        st.session_state.free_chat_history=(st.session_state.get('free_chat_history', []) + [
+            {'role':'user','content':question}, {'role':'assistant','content':answer}])[-40:]
 
 st.sidebar.divider()
 st.sidebar.caption('Data export')
